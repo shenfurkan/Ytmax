@@ -18,6 +18,17 @@ from PIL import Image, ImageDraw
 
 import downloader as dl
 
+def resource_path(relative_path: str) -> str:
+    """ Get absolute path to resource, works for dev and for PyInstaller """
+    try:
+        # PyInstaller creates a temp folder and stores path in _MEIPASS
+        base_path = sys._MEIPASS
+    except Exception:
+        base_path = os.path.abspath(".")
+    return os.path.join(base_path, relative_path)
+
+import sys
+
 # ── Design Tokens ──────────────────────────────────────────────────────────────
 
 ctk.set_appearance_mode("dark")
@@ -117,13 +128,13 @@ class YtmaxApp(ctk.CTk):
         self._card_visible  = False
 
         # Window icon
-        icon_path = Path(__file__).parent / "ytmax.ico"
-        png_path  = Path(__file__).parent / "ytmax.png"
+        icon_path = resource_path("ytmax.ico")
+        png_path  = resource_path("ytmax.png")
         try:
-            if os.name == "nt" and icon_path.exists():
-                self.iconbitmap(str(icon_path))
-            elif png_path.exists():
-                img = tk.PhotoImage(file=str(png_path))
+            if os.name == "nt" and os.path.exists(icon_path):
+                self.iconbitmap(icon_path)
+            elif os.path.exists(png_path):
+                img = tk.PhotoImage(file=png_path)
                 self.wm_iconphoto(True, img)
         except Exception:
             pass
@@ -181,9 +192,9 @@ class YtmaxApp(ctk.CTk):
         tb.pack_propagate(False)
 
         # Brand logo
-        logo_path = Path(__file__).parent / "ytmax.png"
+        logo_path = resource_path("ytmax.png")
         try:
-            if not logo_path.exists():
+            if not os.path.exists(logo_path):
                 raise FileNotFoundError
             limg = Image.open(logo_path).convert("RGBA")
             self._logo_img = ctk.CTkImage(

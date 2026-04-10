@@ -31,3 +31,7 @@ download/
 cookie.txt
 youtube.txt
 version/
+*.spec
+.idea/
+.vscode/
+.DS_Store
