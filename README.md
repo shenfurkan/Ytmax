@@ -1,4 +1,4 @@
-# YTmax
+# <img src="ytmax.png" width="40" height="40" align="top"> YTmax
 
 ![YTmax Main Interface](Images/image1.png)
 
