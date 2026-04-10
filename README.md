@@ -2,7 +2,7 @@
 
 ![YTmax Main Interface](Images/image1.png)
 
-A modern, high performance desktop application for downloading 4K YouTube videos. Featuring a dynamic user interface powered by CustomTkinter, it effortlessly extracts advanced video qualities and bypasses various bot-checks by utilizing browser session cookies.
+A modern, high performance desktop application for downloading 4K videos from YouTube and hundreds of other platforms. Featuring a dynamic user interface powered by CustomTkinter, it effortlessly extracts advanced video qualities and bypasses various bot-checks by utilizing browser session cookies.
 
 ## Features
 
@@ -12,6 +12,7 @@ A modern, high performance desktop application for downloading 4K YouTube videos
   ![Settings Section](Images/image2.png)
 - **Node.js Engine Supported Extractors:** Bypass advanced streaming restrictions automatically internally formatted using the YoutubeDL parser running natively.
 - **Cookie Authentication:** Supports loading exported `youtube.txt` browser cookies to reliably fetch age-restricted items or circumvent Google's automated sign-in checks gracefully.
+- **Multi-Site Support:** Works with YouTube, Twitter, TikTok, Instagram, and hundreds of other supported platforms natively.
 
 ## Prerequisites
 
