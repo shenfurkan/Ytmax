@@ -1,10 +1,9 @@
 """
-downloader.py  —  Core download engine for YT4K
-Uses yt-dlp to fetch 4K streams and FFmpeg to merge video + audio.
+downloader.py  —  Core download engine for YTmax
+Uses yt-dlp to fetch streams and FFmpeg to merge video + audio.
 """
 from __future__ import annotations
 
-import os
 import re
 import threading
 from dataclasses import dataclass, field
@@ -19,23 +18,59 @@ from typing import Callable, Optional
 class DownloadTask:
     url: str
     output_dir: Path
-    quality: str = "4K"          # "4K" | "1440p" | "1080p" | "720p" | "best"
+    quality: str = "4K"
     audio_only: bool = False
-    cookies_file: str = ""       # absolute path to a Netscape cookies.txt, or ""
+    subtitles: bool = True
+    cookies_file: str = ""
     on_progress: Optional[Callable] = field(default=None, repr=False)
     on_complete: Optional[Callable] = field(default=None, repr=False)
     on_error:    Optional[Callable] = field(default=None, repr=False)
 
 
 @dataclass
+class PlaylistDownloadTask:
+    playlist_url: str
+    output_dir: Path
+    quality: str = "4K"
+    audio_only: bool = False
+    subtitles: bool = True
+    cookies_file: str = ""
+    video_urls: list[str] = field(default_factory=list)
+    on_progress: Optional[Callable] = field(default=None, repr=False)
+    on_video_complete: Optional[Callable] = field(default=None, repr=False)
+    on_complete: Optional[Callable] = field(default=None, repr=False)
+    on_error: Optional[Callable] = field(default=None, repr=False)
+
+
+@dataclass
 class VideoInfo:
     title: str
-    duration: int         # seconds
+    duration: int
     uploader: str
-    thumbnail: str        # URL
+    thumbnail: str
     formats: list[dict]
     best_height: int
     thumbnails: list[str] = field(default_factory=list)
+
+
+@dataclass
+class PlaylistVideo:
+    title: str
+    url: str
+    duration: int
+    uploader: str
+    thumbnail: str
+    index: int
+
+
+@dataclass
+class PlaylistInfo:
+    title: str
+    uploader: str
+    thumbnail: str
+    video_count: int
+    total_duration: int
+    videos: list[PlaylistVideo]
 
 
 # ─────────────────────────────────────────────
@@ -43,8 +78,6 @@ class VideoInfo:
 # ─────────────────────────────────────────────
 
 QUALITY_MAP: dict[str, str] = {
-    # Adding an intermediate fallback (/bestvideo+bestaudio) ensures we grab
-    # separate streams if available before falling back to merged /best.
     "4K":    "bestvideo[height<=2160]+bestaudio/bestvideo+bestaudio/best",
     "1440p": "bestvideo[height<=1440]+bestaudio/bestvideo+bestaudio/best",
     "1080p": "bestvideo[height<=1080]+bestaudio/bestvideo+bestaudio/best",
@@ -54,14 +87,9 @@ QUALITY_MAP: dict[str, str] = {
 
 
 # ─────────────────────────────────────────────
-#  Fetch video metadata (no download)
-# ─────────────────────────────────────────────
-
-# ─────────────────────────────────────────────
 #  Bot-check detection
 # ─────────────────────────────────────────────
 
-# Substrings that indicate YouTube's bot/sign-in challenge
 _BOT_SIGNALS = (
     "sign in to confirm",
     "confirm you're not a bot",
@@ -89,30 +117,39 @@ def is_age_error(msg: str) -> bool:
     return any(s in lower for s in _AGE_SIGNALS)
 
 
-def fetch_info(url: str, cookies_file: str = "") -> VideoInfo:
-    """
-    Fetches comprehensive metadata for a given YouTube URL without actually downloading the video streams.
-    
-    This function utilizes the `yt_dlp` library configured mathematically to simulate the browser
-    environment (`tv`, `android`, `ios`, `web_creator` clients) in order to bypass specific client 
-    blocking restrictions often imposed by YouTube (e.g. SABR streaming formats). It extracts 
-    resolutions, durations, thumbnails, and validates active format bitrates seamlessly.
+# ─────────────────────────────────────────────
+#  URL detection
+# ─────────────────────────────────────────────
 
-    Args:
-        url (str): Target YouTube video URL.
-        cookies_file (str): Optional absolute path pointer to the 'youtube.txt' authentication cookie.
-    
-    Returns:
-        VideoInfo: Formatted data class packed with all essential UI metadata rendering variables.
-    """
+_PLAYLIST_PATTERNS = (
+    re.compile(r"youtube\.com/playlist\b", re.IGNORECASE),
+    re.compile(r"[?&]list=[^&]+", re.IGNORECASE),
+)
+
+
+def is_playlist_url(url: str) -> bool:
+    """Detect if a URL targets a YouTube playlist rather than a single video."""
+    lower = url.lower()
+    if "playlist?list=" in lower:
+        return True
+    if any(p.search(url) for p in _PLAYLIST_PATTERNS):
+        return True
+    return False
+
+
+# ─────────────────────────────────────────────
+#  Fetch video metadata
+# ─────────────────────────────────────────────
+
+def fetch_info(url: str, cookies_file: str = "") -> VideoInfo:
     import yt_dlp
     opts: dict = {
         "quiet": True,
         "no_warnings": True,
         "skip_download": True,
         "js_runtimes": {"node": {}},
+        "extractor_args": {"youtube": {"player_client": ["tv", "android", "ios", "web_creator"]}},
     }
-    opts["extractor_args"] = {"youtube": {"player_client": ["tv", "android", "ios", "web_creator"]}}
     if cookies_file:
         opts["cookiefile"] = cookies_file
     with yt_dlp.YoutubeDL(opts) as ydl:
@@ -120,16 +157,60 @@ def fetch_info(url: str, cookies_file: str = "") -> VideoInfo:
 
     formats = info.get("formats", [])
     heights = [f.get("height") or 0 for f in formats if f.get("vcodec") != "none"]
-    best_h  = max(heights, default=0)
+    best_h = max(heights, default=0)
 
     return VideoInfo(
-        title     = info.get("title", "Unknown"),
-        duration  = info.get("duration", 0),
-        uploader  = info.get("uploader", "Unknown"),
-        thumbnail = info.get("thumbnail", ""),
+        title      = info.get("title", "Unknown"),
+        duration   = info.get("duration", 0),
+        uploader   = info.get("uploader", "Unknown"),
+        thumbnail  = info.get("thumbnail", ""),
         thumbnails = [t.get("url") for t in info.get("thumbnails", []) if t.get("url")],
-        formats   = formats,
+        formats    = formats,
         best_height = best_h,
+    )
+
+
+def fetch_playlist_info(url: str, cookies_file: str = "") -> PlaylistInfo:
+    import yt_dlp
+
+    opts: dict = {
+        "quiet": True,
+        "no_warnings": True,
+        "skip_download": True,
+        "extract_flat": "in_playlist",
+        "js_runtimes": {"node": {}},
+        "extractor_args": {"youtube": {"player_client": ["tv", "android", "ios", "web_creator"]}},
+    }
+    if cookies_file:
+        opts["cookiefile"] = cookies_file
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(url, download=False)
+
+    entries = info.get("entries", [])
+    videos: list[PlaylistVideo] = []
+    total_duration = 0
+
+    for idx, entry in enumerate(entries):
+        if not entry:
+            continue
+        dur = entry.get("duration") or 0
+        videos.append(PlaylistVideo(
+            title     = entry.get("title", "Unknown"),
+            url       = entry.get("url", entry.get("webpage_url", "")),
+            duration  = dur,
+            uploader  = entry.get("uploader", entry.get("channel", "Unknown")),
+            thumbnail = entry.get("thumbnail", ""),
+            index     = idx + 1,
+        ))
+        total_duration += dur
+
+    return PlaylistInfo(
+        title          = info.get("title", "Unknown Playlist"),
+        uploader       = info.get("uploader", info.get("channel", "Unknown")),
+        thumbnail      = info.get("thumbnail", ""),
+        video_count    = len(videos),
+        total_duration = total_duration,
+        videos         = videos,
     )
 
 
@@ -137,7 +218,6 @@ def fetch_info(url: str, cookies_file: str = "") -> VideoInfo:
 #  Cookie validation
 # ─────────────────────────────────────────────
 
-# Cookies that indicate a properly authenticated Google/YouTube session
 _AUTH_COOKIES = frozenset({
     "SAPISID", "SID", "HSID", "SSID",
     "__Secure-1PSID", "__Secure-3PSID", "LOGIN_INFO",
@@ -145,15 +225,7 @@ _AUTH_COOKIES = frozenset({
 
 
 def validate_cookies(path: str) -> tuple[bool, str]:
-    """
-    Check a Netscape cookies.txt file for YouTube authentication.
-
-    Returns:
-        (True, success_message)   — file looks good
-        (False, error_message)    — something is wrong
-    """
     p = Path(path)
-
     if not p.exists():
         return False, "File not found."
     if not p.is_file():
@@ -168,7 +240,6 @@ def validate_cookies(path: str) -> tuple[bool, str]:
 
     lines = text.splitlines()
 
-    # Must have the Netscape header
     if not any("Netscape HTTP Cookie File" in ln for ln in lines[:5]):
         return False, (
             "Not a valid Netscape cookies.txt.\n"
@@ -176,7 +247,6 @@ def validate_cookies(path: str) -> tuple[bool, str]:
             "  Export it using the 'Get cookies.txt LOCALLY' browser extension."
         )
 
-    # Parse tab-separated cookie entries
     yt_cookies: dict[str, str] = {}
     for ln in lines:
         ln = ln.strip()
@@ -208,13 +278,52 @@ def validate_cookies(path: str) -> tuple[bool, str]:
 
 
 # ─────────────────────────────────────────────
-#  Download (runs in background thread)
+#  Download workers
 # ─────────────────────────────────────────────
 
 def download(task: DownloadTask) -> None:
-    """Starts the primary download methodology utilizing a fresh daemonized background thread to prevent UI freezing."""
     t = threading.Thread(target=_download_worker, args=(task,), daemon=True)
     t.start()
+
+
+def download_playlist(task: PlaylistDownloadTask) -> None:
+    t = threading.Thread(target=_download_playlist_worker, args=(task,), daemon=True)
+    t.start()
+
+
+def _download_playlist_worker(task: PlaylistDownloadTask) -> None:
+    total = len(task.video_urls)
+    if total == 0:
+        if task.on_error:
+            task.on_error("No video URLs to download.")
+        return
+
+    for idx, url in enumerate(task.video_urls):
+        video_title = f"Video {idx + 1}"
+        if task.on_progress:
+            task.on_progress(idx, total, video_title, url)
+
+        single = DownloadTask(
+            url          = url,
+            output_dir   = task.output_dir,
+            quality      = task.quality,
+            audio_only   = task.audio_only,
+            subtitles    = task.subtitles,
+            cookies_file = task.cookies_file,
+            on_complete  = None,
+            on_error     = None,
+        )
+        try:
+            _download_worker(single)
+            if task.on_video_complete:
+                task.on_video_complete(idx + 1, total, video_title)
+        except Exception as e:
+            if task.on_error:
+                task.on_error(f"Failed: {str(e)}")
+            continue
+
+    if task.on_complete:
+        task.on_complete()
 
 
 def _download_worker(task: DownloadTask) -> None:
@@ -228,18 +337,15 @@ def _download_worker(task: DownloadTask) -> None:
             fmt = f"bestvideo[height<={h}]+bestaudio/bestvideo+bestaudio/best"
         else:
             fmt = QUALITY_MAP.get("4K")
-            
-        last_pct: list[float] = [0.0]
 
         def _hook(d: dict) -> None:
             if d["status"] == "downloading":
-                total   = d.get("total_bytes") or d.get("total_bytes_estimate") or 1
-                done    = d.get("downloaded_bytes", 0)
-                speed   = d.get("speed") or 0
-                eta     = d.get("eta") or 0
-                pct     = done / total * 100
-                fname   = Path(d.get("filename", "")).name
-                last_pct[0] = pct
+                total = d.get("total_bytes") or d.get("total_bytes_estimate") or 1
+                done  = d.get("downloaded_bytes", 0)
+                speed = d.get("speed") or 0
+                eta   = d.get("eta") or 0
+                pct   = done / total * 100
+                fname = Path(d.get("filename", "")).name
                 if task.on_progress:
                     task.on_progress(pct, speed, eta, fname)
             elif d["status"] == "finished":
@@ -247,33 +353,40 @@ def _download_worker(task: DownloadTask) -> None:
                     task.on_progress(100, 0, 0, Path(d.get("filename", "")).name)
 
         opts: dict = {
-            "format":          fmt,
-            "outtmpl":         str(task.output_dir / "%(title)s [%(height)sp].%(ext)s"),
-            "merge_output_format": "mp4",
-            "progress_hooks":  [_hook],
-            "quiet":           True,
-            "no_warnings":     True,
-            "js_runtimes":     {"node": {}},
-            # FFmpeg post-processor – merges video+audio
-            "postprocessors":  [{
+            "format":                       fmt,
+            "outtmpl":                      str(task.output_dir / "%(title)s [%(height)sp].%(ext)s"),
+            "merge_output_format":          "mp4",
+            "progress_hooks":               [_hook],
+            "quiet":                        True,
+            "no_warnings":                  True,
+            "js_runtimes":                  {"node": {}},
+            "extractor_args":               {"youtube": {"player_client": ["tv", "android", "ios", "web_creator"]}},
+            "postprocessors":               [{
                 "key":             "FFmpegVideoConvertor",
                 "preferedformat":  "mp4",
             }],
             "concurrent_fragment_downloads": 4,
         }
 
-        opts["extractor_args"] = {"youtube": {"player_client": ["tv", "android", "ios", "web_creator"]}}
-        # Inject cookies file if provided
         if task.cookies_file:
             opts["cookiefile"] = task.cookies_file
 
         if task.audio_only:
             opts["postprocessors"] = [{
-                "key":             "FFmpegExtractAudio",
-                "preferredcodec":  "mp3",
+                "key":              "FFmpegExtractAudio",
+                "preferredcodec":   "mp3",
                 "preferredquality": "320",
             }]
             opts["outtmpl"] = str(task.output_dir / "%(title)s.%(ext)s")
+
+        if task.subtitles and not task.audio_only:
+            opts["writesubtitles"] = True
+            opts["writeautomaticsub"] = False
+            opts["subtitleslangs"] = ["all"]
+            opts.setdefault("postprocessors", []).append({
+                "key":    "FFmpegSubtitlesConvertor",
+                "format": "srt",
+            })
 
         import yt_dlp
         with yt_dlp.YoutubeDL(opts) as ydl:
@@ -282,26 +395,24 @@ def _download_worker(task: DownloadTask) -> None:
         if task.on_complete:
             task.on_complete()
 
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         raw = str(exc)
-        # Check if the format is completely unavailable (usually meaning 0 formats extracted)
         if "Requested format is not available" in raw:
             msg = (
-                "✖ No video streams could be extracted for this video.\n"
-                "  This is typically caused by YouTube forcing SABR streaming for the web client.\n"
-                "  If it still fails, ensure Node.js is installed or run:\n"
+                "No video streams could be extracted for this video.\n"
+                "  This is typically caused by YouTube forcing SABR streaming.\n"
+                "  Ensure Node.js is installed or run:\n"
                 "     pip install --upgrade yt-dlp yt-dlp-ejs"
             )
-        # Always include the raw error so user (and we) can debug
         elif is_age_error(raw):
             msg = (
-                f"⚠ Age-restricted video.\n"
+                f"Age-restricted video.\n"
                 f"  Load a cookies.txt from a logged-in Google account.\n"
                 f"  Raw error: {raw}"
             )
         elif is_bot_error(raw):
             msg = (
-                f"⚠ YouTube bot/sign-in check triggered.\n"
+                f"YouTube bot/sign-in check triggered.\n"
                 f"  Load a cookies.txt from your browser.\n"
                 f"  Raw error: {raw}"
             )
@@ -316,7 +427,6 @@ def _download_worker(task: DownloadTask) -> None:
 # ─────────────────────────────────────────────
 
 def fmt_size(bps: float) -> str:
-    """Convert bytes/sec → human-readable string."""
     if bps < 1024:
         return f"{bps:.0f} B/s"
     elif bps < 1024 ** 2:
@@ -327,7 +437,6 @@ def fmt_size(bps: float) -> str:
 
 
 def fmt_time(seconds: int) -> str:
-    """Convert seconds → mm:ss or hh:mm:ss."""
     seconds = int(seconds)
     h, r = divmod(seconds, 3600)
     m, s = divmod(r, 60)
@@ -335,6 +444,8 @@ def fmt_time(seconds: int) -> str:
 
 
 def fmt_duration(seconds: int) -> str:
+    if seconds <= 0:
+        return ""
     h, r = divmod(int(seconds), 3600)
     m, s = divmod(r, 60)
     parts = []

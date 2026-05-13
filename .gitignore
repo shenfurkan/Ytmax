@@ -31,6 +31,7 @@ download/
 cookie.txt
 youtube.txt
 version/
+installer_output/
 *.spec
 .idea/
 .vscode/
